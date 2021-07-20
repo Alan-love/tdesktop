@@ -33,7 +33,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 
 namespace {
 
-constexpr auto kPreloadPages = 2;
 constexpr auto kFullArcLength = 360 * 16;
 
 enum class Color {
@@ -166,7 +165,7 @@ private:
 			link.usageLimit)
 		: tr::lng_group_invite_no_joined(tr::now);
 	const auto add = [&](const QString &text) {
-		result += QString::fromUtf8(" \xE2\xB8\xB1 ") + text;
+		result += QString::fromUtf8(" \xE2\x80\xA2 ") + text;
 	};
 	if (revoked) {
 		return result;
@@ -189,8 +188,7 @@ private:
 				left / 86400));
 		} else {
 			const auto time = base::unixtime::parse(link.expireDate).time();
-			add(time.toString(QLocale::system().dateTimeFormat(
-				QLocale::LongFormat)));
+			add(QLocale::system().toString(time, QLocale::LongFormat));
 		}
 	}
 	return result;
@@ -534,7 +532,7 @@ void LinksController::rowClicked(not_null<PeerListRow*> row) {
 }
 
 void LinksController::rowActionClicked(not_null<PeerListRow*> row) {
-	delegate()->peerListShowRowMenu(row, nullptr);
+	delegate()->peerListShowRowMenu(row, true);
 }
 
 base::unique_qptr<Ui::PopupMenu> LinksController::rowContextMenu(
@@ -571,6 +569,9 @@ base::unique_qptr<Ui::PopupMenu> LinksController::createRowContextMenu(
 		});
 		result->addAction(tr::lng_group_invite_context_share(tr::now), [=] {
 			ShareInviteLinkBox(_peer, link);
+		});
+		result->addAction(tr::lng_group_invite_context_qr(tr::now), [=] {
+			InviteLinkQrBox(link);
 		});
 		result->addAction(tr::lng_group_invite_context_edit(tr::now), [=] {
 			EditLink(_peer, data);
@@ -764,7 +765,7 @@ void AdminsController::prepare() {
 			owner.processUsers(data.vusers());
 			for (const auto &admin : data.vadmins().v) {
 				admin.match([&](const MTPDchatAdminWithInvites &data) {
-					const auto adminId = data.vadmin_id().v;
+					const auto adminId = data.vadmin_id();
 					if (const auto user = owner.userLoaded(adminId)) {
 						if (!user->isSelf()) {
 							appendRow(user, data.vinvites_count().v);

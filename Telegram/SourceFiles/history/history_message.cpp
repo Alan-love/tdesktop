@@ -70,7 +70,7 @@ namespace {
 	if (const auto media = fwd->media()) {
 		if (dynamic_cast<Data::MediaWebPage*>(media)) {
 			// Drop web page if we're not allowed to send it.
-			if (peer->amRestricted(ChatRestriction::f_embed_links)) {
+			if (peer->amRestricted(ChatRestriction::EmbedLinks)) {
 				result &= ~MTPDmessage::Flag::f_media;
 			}
 		}
@@ -152,7 +152,7 @@ QString GetErrorTextForSending(
 	}
 	const auto error = Data::RestrictionError(
 		peer,
-		ChatRestriction::f_send_inline);
+		ChatRestriction::SendInline);
 	if (error && HasInlineItems(items)) {
 		return *error;
 	}
@@ -330,7 +330,7 @@ void FastShareMessage(not_null<HistoryItem*> item) {
 						Ui::hideLayer();
 					}
 					finish();
-				}).fail([=](const RPCError &error) {
+				}).fail([=](const MTP::Error &error) {
 					finish();
 				}).afterRequest(history->sendRequestId).send();
 				return history->sendRequestId;
@@ -350,11 +350,12 @@ void FastShareMessage(not_null<HistoryItem*> item) {
 	auto copyLinkCallback = canCopyLink
 		? Fn<void()>(std::move(copyCallback))
 		: Fn<void()>();
-	Ui::show(Box<ShareBox>(
-		App::wnd()->sessionController(),
-		std::move(copyLinkCallback),
-		std::move(submitCallback),
-		std::move(filterCallback)));
+	Ui::show(Box<ShareBox>(ShareBox::Descriptor{
+		.session = session,
+		.copyCallback = std::move(copyLinkCallback),
+		.submitCallback = std::move(submitCallback),
+		.filterCallback = std::move(filterCallback),
+		.navigation = App::wnd()->sessionController() }));
 }
 
 Fn<void(ChannelData*, MsgId)> HistoryDependentItemCallback(
@@ -638,7 +639,7 @@ HistoryMessage::HistoryMessage(
 
 	const auto ignoreMedia = [&] {
 		if (mediaOriginal && mediaOriginal->webpage()) {
-			if (peer->amRestricted(ChatRestriction::f_embed_links)) {
+			if (peer->amRestricted(ChatRestriction::EmbedLinks)) {
 				return true;
 			}
 		}
@@ -788,9 +789,9 @@ bool HistoryMessage::checkCommentsLinkedChat(ChannelId id) const {
 		return true;
 	} else if (const auto channel = history()->peer->asChannel()) {
 		if (channel->linkedChatKnown()
-			|| !(channel->flags() & MTPDchannel::Flag::f_has_link)) {
+			|| !(channel->flags() & ChannelDataFlag::HasLink)) {
 			const auto linked = channel->linkedChat();
-			if (!linked || linked->bareId() != id) {
+			if (!linked || peerToChannel(linked->id) != id) {
 				return false;
 			}
 		}
@@ -856,7 +857,12 @@ MsgId HistoryMessage::computeRepliesInboxReadTillFull() const {
 		? history()->owner().historyLoaded(
 			peerFromChannel(views->commentsMegagroupId))
 		: history().get();
-	return group ? std::max(local, group->inboxReadTillId()) : local;
+	if (const auto megagroup = group->peer->asChannel()) {
+		if (megagroup->amIn()) {
+			return std::max(local, group->inboxReadTillId());
+		}
+	}
+	return local;
 }
 
 MsgId HistoryMessage::repliesOutboxReadTill() const {
@@ -890,7 +896,12 @@ MsgId HistoryMessage::computeRepliesOutboxReadTillFull() const {
 		? history()->owner().historyLoaded(
 			peerFromChannel(views->commentsMegagroupId))
 		: history().get();
-	return group ? std::max(local, group->outboxReadTillId()) : local;
+	if (const auto megagroup = group->peer->asChannel()) {
+		if (megagroup->amIn()) {
+			return std::max(local, group->outboxReadTillId());
+		}
+	}
+	return local;
 }
 
 void HistoryMessage::setRepliesMaxId(MsgId maxId) {
@@ -1045,6 +1056,9 @@ void HistoryMessage::createComponents(const CreateConfig &config) {
 		if (savedFrom && savedFrom->isChannel()) {
 			mask |= HistoryMessageSigned::Bit();
 		}
+	} else if ((_history->peer->isSelf() || _history->peer->isRepliesChat())
+		&& !config.authorOriginal.isEmpty()) {
+		mask |= HistoryMessageSigned::Bit();
 	}
 	if (config.editDate != TimeId(0)) {
 		mask |= HistoryMessageEdited::Bit();
@@ -1094,7 +1108,7 @@ void HistoryMessage::createComponents(const CreateConfig &config) {
 						MTP_int(0),
 						MTP_int(0),
 						MTPVector<MTPPeer>(), // recent_repliers
-						MTP_int(linked->bareId()),
+						MTP_int(peerToChannel(linked->id).bare),
 						MTP_int(0), // max_id
 						MTP_int(0))); // read_max_id
 				}
@@ -1201,6 +1215,10 @@ void HistoryMessage::returnSavedMedia() {
 
 void HistoryMessage::setMedia(const MTPMessageMedia &media) {
 	_media = CreateMedia(this, media);
+	checkBuyButton();
+}
+
+void HistoryMessage::checkBuyButton() {
 	if (const auto invoice = _media ? _media->invoice() : nullptr) {
 		if (invoice->receiptMsgId) {
 			replaceBuyWithReceiptInMarkup();
@@ -1327,11 +1345,18 @@ std::unique_ptr<Data::Media> HistoryMessage::CreateMedia(
 }
 
 void HistoryMessage::replaceBuyWithReceiptInMarkup() {
-	if (auto markup = inlineReplyMarkup()) {
+	if (const auto markup = inlineReplyMarkup()) {
 		for (auto &row : markup->rows) {
 			for (auto &button : row) {
 				if (button.type == HistoryMessageMarkupButton::Type::Buy) {
-					button.text = tr::lng_payments_receipt_button(tr::now);
+					const auto receipt = tr::lng_payments_receipt_button(tr::now);
+					if (button.text != receipt) {
+						button.text = receipt;
+						if (markup->inlineKeyboard) {
+							markup->inlineKeyboard = nullptr;
+							history()->owner().requestItemResize(this);
+						}
+					}
 				}
 			}
 		}
@@ -1495,7 +1520,10 @@ TextWithEntities HistoryMessage::withLocalEntities(
 		const auto document = reply->replyToDocumentId
 			? history()->owner().document(reply->replyToDocumentId).get()
 			: nullptr;
-		if (document && (document->isVideoFile() || document->isSong())) {
+		if (document
+			&& (document->isVideoFile()
+				|| document->isSong()
+				|| document->isVoiceMessage())) {
 			using namespace HistoryView;
 			const auto duration = document->getDuration();
 			const auto base = (duration > 0)
@@ -1717,10 +1745,11 @@ void HistoryMessage::setReplies(const MTPMessageReplies &data) {
 			return result;
 		}();
 		const auto count = data.vreplies().v;
-		const auto channelId = data.vchannel_id().value_or_empty();
+		const auto channelId = ChannelId(
+			data.vchannel_id().value_or_empty());
 		const auto readTillId = data.vread_max_id()
 			? std::max(
-				{ views->repliesInboxReadTillId,  data.vread_max_id()->v, 1 })
+				{ views->repliesInboxReadTillId, data.vread_max_id()->v, 1 })
 			: views->repliesInboxReadTillId;
 		const auto maxId = data.vmax_id().value_or(views->repliesMaxId);
 		const auto countsChanged = (views->replies.count != count)

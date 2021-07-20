@@ -304,9 +304,10 @@ void ConfirmBox::mouseReleaseEvent(QMouseEvent *e) {
 	_lastMousePos = e->globalPos();
 	updateHover();
 	if (const auto activated = ClickHandler::unpressed()) {
-		const auto guard = window();
-		Ui::hideLayer();
-		ActivateClickHandler(guard, activated, e->button());
+		ActivateClickHandler(window(), activated, e->button());
+		crl::on_main(this, [=] {
+			closeBox();
+		});
 		return;
 	}
 	BoxContent::mouseReleaseEvent(e);
@@ -536,7 +537,7 @@ void PinMessageBox::pinMessage() {
 	)).done([=](const MTPUpdates &result) {
 		_peer->session().api().applyUpdates(result);
 		Ui::hideLayer();
-	}).fail([=](const RPCError &error) {
+	}).fail([=](const MTP::Error &error) {
 		Ui::hideLayer();
 	}).send();
 }
@@ -675,7 +676,9 @@ void DeleteMessagesBox::prepare() {
 		_wipeHistoryPeer->updateFull();
 		_autoDeleteSettings.create(
 			this,
-			tr::lng_edit_auto_delete_settings(tr::now),
+			(_wipeHistoryPeer->messagesTTL()
+				? tr::lng_edit_auto_delete_settings(tr::now)
+				: tr::lng_enable_auto_delete(tr::now)),
 			st::boxLinkButton);
 		_autoDeleteSettings->setClickedCallback([=] {
 			getDelegate()->show(
@@ -760,11 +763,11 @@ auto DeleteMessagesBox::revokeText(not_null<PeerData*> peer) const
 		return result;
 	}
 
-	const auto items = ranges::view::all(
+	const auto items = ranges::views::all(
 		_ids
-	) | ranges::view::transform([&](FullMsgId id) {
+	) | ranges::views::transform([&](FullMsgId id) {
 		return peer->owner().message(id);
-	}) | ranges::view::filter([](HistoryItem *item) {
+	}) | ranges::views::filter([](HistoryItem *item) {
 		return (item != nullptr);
 	}) | ranges::to_vector;
 
@@ -781,7 +784,7 @@ auto DeleteMessagesBox::revokeText(not_null<PeerData*> peer) const
 		return !item->canDeleteForEveryone(now);
 	};
 	const auto canRevokeAll = ranges::none_of(items, cannotRevoke);
-	auto outgoing = items | ranges::view::filter(&HistoryItem::out);
+	auto outgoing = items | ranges::views::filter(&HistoryItem::out);
 	const auto canRevokeOutgoingCount = canRevokeAll
 		? -1
 		: ranges::count_if(outgoing, canRevoke);
@@ -898,7 +901,7 @@ void DeleteMessagesBox::deleteAndClear() {
 			_moderateInChannel->session().api().kickParticipant(
 				_moderateInChannel,
 				_moderateFrom,
-				MTP_chatBannedRights(MTP_flags(0), MTP_int(0)));
+				ChatRestrictionsInfo());
 		}
 		if (_reportSpam->checked()) {
 			_moderateInChannel->session().api().request(

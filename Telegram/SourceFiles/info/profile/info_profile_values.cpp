@@ -380,13 +380,13 @@ template <typename Flag, typename Peer>
 rpl::producer<Badge> BadgeValueFromFlags(Peer peer) {
 	return Data::PeerFlagsValue(
 		peer,
-		Flag::f_verified | Flag::f_scam | Flag::f_fake
+		Flag::Verified | Flag::Scam | Flag::Fake
 	) | rpl::map([=](base::flags<Flag> value) {
-		return (value & Flag::f_verified)
+		return (value & Flag::Verified)
 			? Badge::Verified
-			: (value & Flag::f_scam)
+			: (value & Flag::Scam)
 			? Badge::Scam
-			: (value & Flag::f_fake)
+			: (value & Flag::Fake)
 			? Badge::Fake
 			: Badge::None;
 	});
@@ -394,28 +394,12 @@ rpl::producer<Badge> BadgeValueFromFlags(Peer peer) {
 
 rpl::producer<Badge> BadgeValue(not_null<PeerData*> peer) {
 	if (const auto user = peer->asUser()) {
-		return BadgeValueFromFlags<MTPDuser::Flag>(user);
+		return BadgeValueFromFlags<UserDataFlag>(user);
 	} else if (const auto channel = peer->asChannel()) {
-		return BadgeValueFromFlags<MTPDchannel::Flag>(channel);
+		return BadgeValueFromFlags<ChannelDataFlag>(channel);
 	}
 	return rpl::single(Badge::None);
 }
-
-// // #feed
-//rpl::producer<int> FeedChannelsCountValue(not_null<Data::Feed*> feed) {
-//	using Flag = Data::FeedUpdateFlag;
-//	return rpl::single(
-//		Data::FeedUpdate{ feed, Flag::Channels }
-//	) | rpl::then(
-//		feed->owner().feedUpdated()
-//	) | rpl::filter([=](const Data::FeedUpdate &update) {
-//		return (update.feed == feed) && (update.flag == Flag::Channels);
-//	}) | rpl::filter([=] {
-//		return feed->channelsLoaded();
-//	}) | rpl::map([=] {
-//		return int(feed->channels().size());
-//	}) | rpl::distinct_until_changed();
-//}
 
 } // namespace Profile
 } // namespace Info

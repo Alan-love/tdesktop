@@ -25,7 +25,6 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "storage/file_upload.h"
 #include "storage/storage_facade.h"
 #include "storage/storage_shared_media.h"
-//#include "storage/storage_feed_messages.h" // #feed
 #include "main/main_session.h"
 #include "apiwrap.h"
 #include "media/audio/media_audio.h"
@@ -193,6 +192,14 @@ TimeId HistoryItem::date() const {
 
 TimeId HistoryItem::NewMessageDate(TimeId scheduled) {
 	return scheduled ? scheduled : base::unixtime::now();
+}
+
+void HistoryItem::applyServiceDateEdition(const MTPDmessageService &data) {
+	const auto date = data.vdate().v;
+	if (_date == date) {
+		return;
+	}
+	_date = date;
 }
 
 void HistoryItem::finishEdition(int oldKeyboardTop) {
@@ -550,13 +557,6 @@ void HistoryItem::indexAsNewItem() {
 				_history->peer->setHasPinnedMessages(true);
 			}
 		}
-		//if (const auto channel = history()->peer->asChannel()) { // #feed
-		//	if (const auto feed = channel->feed()) {
-		//		_history->session().storage().add(Storage::FeedMessagesAddNew(
-		//			feed->id(),
-		//			position()));
-		//	}
-		//}
 	}
 }
 
@@ -701,9 +701,11 @@ bool HistoryItem::suggestReport() const {
 }
 
 bool HistoryItem::suggestBanReport() const {
-	auto channel = history()->peer->asChannel();
-	auto fromUser = from()->asUser();
-	if (!channel || !fromUser || !channel->canRestrictUser(fromUser)) {
+	const auto channel = history()->peer->asChannel();
+	const auto fromUser = from()->asUser();
+	if (!channel
+		|| !fromUser
+		|| !channel->canRestrictParticipant(fromUser)) {
 		return false;
 	}
 	return !isPost() && !out();
@@ -876,7 +878,7 @@ bool HistoryItem::unread() const {
 				return false;
 			}
 			if (const auto user = history()->peer->asUser()) {
-				if (user->isBot()) {
+				if (user->isBot() && !user->isSupport()) {
 					return false;
 				}
 			} else if (const auto channel = history()->peer->asChannel()) {

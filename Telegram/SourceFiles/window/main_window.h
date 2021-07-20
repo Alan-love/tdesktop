@@ -11,6 +11,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "ui/rp_widget.h"
 #include "base/timer.h"
 #include "base/object_ptr.h"
+#include "core/core_settings.h"
 
 #include <QtWidgets/QSystemTrayIcon>
 
@@ -36,11 +37,10 @@ QImage LoadLogoNoMargin();
 QIcon CreateIcon(Main::Session *session = nullptr);
 void ConvertIconToBlack(QImage &image);
 
-class MainWindow : public Ui::RpWidget, protected base::Subscriber {
-	Q_OBJECT
-
+class MainWindow : public Ui::RpWidget {
 public:
 	explicit MainWindow(not_null<Controller*> controller);
+	virtual ~MainWindow();
 
 	[[nodiscard]] Window::Controller &controller() const {
 		return *_controller;
@@ -57,15 +57,17 @@ public:
 		showFromTray();
 	}
 
+	[[nodiscard]] QRect desktopRect() const;
+
 	void init();
-	HitTestResult hitTest(const QPoint &p) const;
+	[[nodiscard]] HitTestResult hitTest(const QPoint &p) const;
 
 	void updateIsActive();
 
-	bool isActive() const {
+	[[nodiscard]] bool isActive() const {
 		return _isActive;
 	}
-	virtual bool isActiveForTrayMenu() {
+	[[nodiscard]] virtual bool isActiveForTrayMenu() {
 		updateIsActive();
 		return isActive();
 	}
@@ -94,17 +96,15 @@ public:
 	}
 	virtual void fixOrder() {
 	}
-
-	virtual ~MainWindow();
+	virtual void setInnerFocus() {
+		setFocus();
+	}
 
 	Ui::RpWidget *bodyWidget() {
 		return _body.data();
 	}
 
-	void launchDrag(std::unique_ptr<QMimeData> data);
-	base::Observable<void> &dragFinished() {
-		return _dragFinished;
-	}
+	void launchDrag(std::unique_ptr<QMimeData> data, Fn<void()> &&callback);
 
 	rpl::producer<> leaveEvents() const;
 
@@ -121,7 +121,6 @@ public:
 
 	bool hasShadow() const;
 
-public slots:
 	bool minimizeToTray();
 	void updateGlobalMenu() {
 		updateGlobalMenuHook();
@@ -140,7 +139,7 @@ protected:
 	virtual void initHook() {
 	}
 
-	virtual void updateIsActiveHook() {
+	virtual void activeChangedHook() {
 	}
 
 	virtual void handleActiveChangedHook() {
@@ -176,7 +175,7 @@ protected:
 	virtual void showTrayTooltip() {
 	}
 
-	virtual void workmodeUpdated(DBIWorkMode mode) {
+	virtual void workmodeUpdated(Core::Settings::WorkMode mode) {
 	}
 
 	virtual void createGlobalMenu() {
@@ -198,6 +197,8 @@ protected:
 	virtual void handleTrayIconActication(
 		QSystemTrayIcon::ActivationReason reason) = 0;
 	void updateUnreadCounter();
+
+	virtual QRect computeDesktopRect() const;
 
 private:
 	void refreshTitleWidget();
@@ -226,10 +227,12 @@ private:
 
 	bool _isActive = false;
 
-	base::Observable<void> _dragFinished;
 	rpl::event_stream<> _leaveEvents;
 
 	bool _maximizedBeforeHide = false;
+
+	mutable QRect _monitorRect;
+	mutable crl::time _monitorLastGot = 0;
 
 };
 
