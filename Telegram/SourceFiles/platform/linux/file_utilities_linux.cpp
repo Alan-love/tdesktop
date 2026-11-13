@@ -7,117 +7,128 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "platform/linux/file_utilities_linux.h"
 
-#include "platform/linux/linux_gtk_integration.h"
-#include "platform/linux/specific_linux.h"
+#include "base/platform/base_platform_info.h"
+#include "base/platform/linux/base_linux_xdp_utilities.h"
+#include "base/platform/linux/base_linux_xdg_activation_token.h"
+#include "base/random.h"
 
-#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
-#include "platform/linux/linux_xdp_file_dialog.h"
-#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
-
-#include <QtGui/QDesktopServices>
-
-extern "C" {
-#undef signals
-#include <gio/gio.h>
-#define signals public
-} // extern "C"
-
-using Platform::internal::GtkIntegration;
+#include <fcntl.h>
+#include <xdpopenuri/xdpopenuri.hpp>
+#include <xdprequest/xdprequest.hpp>
 
 namespace Platform {
 namespace File {
+namespace {
 
-void UnsafeOpenUrl(const QString &url) {
-	if (!g_app_info_launch_default_for_uri(
-		url.toUtf8().constData(),
-		nullptr,
-		nullptr)) {
-		QDesktopServices::openUrl(url);
-	}
-}
+using namespace gi::repository;
+using base::Platform::XdgActivationToken;
 
-void UnsafeOpenEmailLink(const QString &email) {
-	UnsafeOpenUrl(qstr("mailto:") + email);
-}
+} // namespace
+
+namespace Unfused {
 
 bool UnsafeShowOpenWith(const QString &filepath) {
-	if (InFlatpak() || InSnap()) {
+	auto proxy = XdpOpenURI::OpenURIProxy::new_for_bus_sync(
+		Gio::BusType::SESSION_,
+		Gio::DBusProxyFlags::NONE_,
+		base::Platform::XDP::kService,
+		base::Platform::XDP::kObjectPath,
+		nullptr);
+
+	if (!proxy) {
 		return false;
 	}
 
-	if (const auto integration = GtkIntegration::Instance()) {
-		const auto absolutePath = QFileInfo(filepath).absoluteFilePath();
-		return integration->showOpenWithDialog(absolutePath);
+	auto interface = XdpOpenURI::OpenURI(proxy);
+	if (interface.get_version() < 3) {
+		return false;
 	}
 
-	return false;
-}
+	const auto fd = open(
+		QFile::encodeName(filepath).constData(),
+		O_RDONLY | O_CLOEXEC);
 
-void UnsafeLaunch(const QString &filepath) {
-	const auto absolutePath = QFileInfo(filepath).absoluteFilePath();
+	if (fd == -1) {
+		return false;
+	}
 
-	if (!g_app_info_launch_default_for_uri(
-		g_filename_to_uri(
-			absolutePath.toUtf8().constData(),
+	const auto handleToken = "tdesktop"
+		+ std::to_string(base::RandomValue<uint>());
+
+	std::string uniqueName = proxy.get_connection().get_unique_name();
+	uniqueName.erase(0, 1);
+	uniqueName.replace(uniqueName.find('.'), 1, 1, '_');
+
+	auto request = XdpRequest::Request(
+		XdpRequest::RequestProxy::new_sync(
+			proxy.get_connection(),
+			Gio::DBusProxyFlags::NONE_,
+			base::Platform::XDP::kService,
+			base::Platform::XDP::kObjectPath
+				+ std::string("/request/")
+				+ uniqueName
+				+ '/'
+				+ handleToken,
 			nullptr,
-			nullptr),
-		nullptr,
-		nullptr)) {
-		if (!UnsafeShowOpenWith(filepath)) {
-			QDesktopServices::openUrl(QUrl::fromLocalFile(filepath));
-		}
+			nullptr));
+
+	if (!request) {
+		close(fd);
+		return false;
 	}
+
+	auto loop = GLib::MainLoop::new_();
+	auto response = guint(2);
+
+	const auto signalId = request.signal_response().connect([&response, loop](
+			XdpRequest::Request,
+			guint code,
+			GLib::Variant) mutable {
+		response = code;
+		loop.quit();
+	});
+
+	const auto signalGuard = gsl::finally([&] {
+		request.disconnect(signalId);
+	});
+
+	auto result = interface.call_open_file_sync(
+		base::Platform::XDP::ParentWindowID(),
+		GLib::Variant::new_handle(0),
+		GLib::Variant::new_array({
+			GLib::Variant::new_dict_entry(
+				GLib::Variant::new_string("handle_token"),
+				GLib::Variant::new_variant(
+					GLib::Variant::new_string(handleToken))),
+			GLib::Variant::new_dict_entry(
+				GLib::Variant::new_string("activation_token"),
+				GLib::Variant::new_variant(
+					GLib::Variant::new_string(
+						XdgActivationToken().toStdString()))),
+			GLib::Variant::new_dict_entry(
+				GLib::Variant::new_string("ask"),
+				GLib::Variant::new_variant(
+					GLib::Variant::new_boolean(true))),
+		}),
+		Gio::UnixFDList::new_from_array(&fd, 1),
+		nullptr);
+
+	if (!result) {
+		return false;
+	}
+
+	QWidget window;
+	window.setAttribute(Qt::WA_DontShowOnScreen);
+	window.setWindowModality(Qt::ApplicationModal);
+	window.show();
+	loop.run();
+
+	// WHY: OpenURI Response 0 (success) and 1 (user cancelled) both mean a
+	// chooser was shown, so don't fall back; any other Response code means
+	// none appeared and the caller falls back to the launch warning policy.
+	return (response == 0) || (response == 1);
 }
 
+} // namespace Unfused
 } // namespace File
-
-namespace FileDialog {
-
-bool Get(
-		QPointer<QWidget> parent,
-		QStringList &files,
-		QByteArray &remoteContent,
-		const QString &caption,
-		const QString &filter,
-		::FileDialog::internal::Type type,
-		QString startFile) {
-	if (parent) {
-		parent = parent->window();
-	}
-#ifndef DESKTOP_APP_DISABLE_DBUS_INTEGRATION
-	if (XDP::Use(type)) {
-		return XDP::Get(
-			parent,
-			files,
-			remoteContent,
-			caption,
-			filter,
-			type,
-			startFile);
-	}
-#endif // !DESKTOP_APP_DISABLE_DBUS_INTEGRATION
-	if (const auto integration = GtkIntegration::Instance()) {
-		if (integration->fileDialogSupported()
-			&& integration->useFileDialog(type)) {
-			return integration->getFileDialog(
-				parent,
-				files,
-				remoteContent,
-				caption,
-				filter,
-				type,
-				startFile);
-		}
-	}
-	return ::FileDialog::internal::GetDefault(
-		parent,
-		files,
-		remoteContent,
-		caption,
-		filter,
-		type,
-		startFile);
-}
-
-} // namespace FileDialog
 } // namespace Platform

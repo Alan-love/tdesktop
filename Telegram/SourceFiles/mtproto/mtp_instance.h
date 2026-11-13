@@ -8,7 +8,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #pragma once
 
 #include "mtproto/details/mtproto_serialized_request.h"
-#include "mtproto/mtproto_rpc_sender.h"
+#include "mtproto/mtproto_response.h"
 
 namespace MTP {
 namespace details {
@@ -23,6 +23,7 @@ class Session;
 class DcOptions;
 class Config;
 struct ConfigFields;
+struct ProxyData;
 class AuthKey;
 using AuthKeyPtr = std::shared_ptr<AuthKey>;
 using AuthKeysList = std::vector<AuthKeyPtr>;
@@ -65,6 +66,7 @@ public:
 	void suggestMainDcId(DcId mainDcId);
 	void setMainDcId(DcId mainDcId);
 	[[nodiscard]] DcId mainDcId() const;
+	[[nodiscard]] rpl::producer<DcId> mainDcIdValue() const;
 	[[nodiscard]] QString systemLangCode() const;
 	[[nodiscard]] QString cloudLangCode() const;
 	[[nodiscard]] QString langPackName() const;
@@ -102,21 +104,26 @@ public:
 	void reInitConnection(DcId dcId);
 	void logout(Fn<void()> done);
 
-	void setUpdatesHandler(RPCDoneHandlerPtr onDone);
-	void setGlobalFailHandler(RPCFailHandlerPtr onFail);
-	void setStateChangedHandler(Fn<void(ShiftedDcId shiftedDcId, int32 state)> handler);
+	void setUpdatesHandler(Fn<void(const Response&)> handler);
+	void setGlobalFailHandler(
+		Fn<void(const Error&, const Response&)> handler);
+	void setStateChangedHandler(
+		Fn<void(ShiftedDcId shiftedDcId, int32 state)> handler);
 	void setSessionResetHandler(Fn<void(ShiftedDcId shiftedDcId)> handler);
 	void clearGlobalHandlers();
 
 	void onStateChange(ShiftedDcId shiftedDcId, int32 state);
 	void onSessionReset(ShiftedDcId shiftedDcId);
 
-	void execCallback(mtpRequestId requestId, const mtpPrime *from, const mtpPrime *end);
-	bool hasCallbacks(mtpRequestId requestId);
-	void globalCallback(const mtpPrime *from, const mtpPrime *end);
+	[[nodiscard]] bool hasCallback(mtpRequestId requestId) const;
+	void processCallback(const Response &response);
+	void processUpdate(const Response &message);
 
 	// return true if need to clean request data
-	bool rpcErrorOccured(mtpRequestId requestId, const RPCFailHandlerPtr &onFail, const RPCError &err);
+	bool rpcErrorOccured(
+		const Response &response,
+		const FailHandler &onFail,
+		const Error &err);
 
 	// Thread-safe.
 	bool isKeysDestroyer() const;
@@ -129,10 +136,14 @@ public:
 	void requestConfigIfOld();
 	void requestCDNConfig();
 	void setUserPhone(const QString &phone);
-	void badConfigurationError();
+	void badConfigurationError(const ProxyData &proxy);
 
 	void restartedByTimeout(ShiftedDcId shiftedDcId);
 	[[nodiscard]] rpl::producer<ShiftedDcId> restartsByTimeout() const;
+
+	[[nodiscard]] auto nonPremiumDelayedRequests() const
+		-> rpl::producer<mtpRequestId>;
+	[[nodiscard]] rpl::producer<> frozenErrorReceived() const;
 
 	void syncHttpUnixtime();
 
@@ -141,11 +152,14 @@ public:
 	template <typename Request>
 	mtpRequestId send(
 			const Request &request,
-			RPCResponseHandler &&callbacks = {},
+			ResponseHandler &&callbacks = {},
 			ShiftedDcId shiftedDcId = 0,
 			crl::time msCanWait = 0,
-			mtpRequestId afterRequestId = 0) {
-		const auto requestId = details::GetNextRequestId();
+			mtpRequestId afterRequestId = 0,
+			mtpRequestId overrideRequestId = 0) {
+		const auto requestId = overrideRequestId
+			? overrideRequestId
+			: details::GetNextRequestId();
 		sendSerialized(
 			requestId,
 			details::SerializedRequest::Serialize(request),
@@ -159,17 +173,19 @@ public:
 	template <typename Request>
 	mtpRequestId send(
 			const Request &request,
-			RPCDoneHandlerPtr &&onDone,
-			RPCFailHandlerPtr &&onFail = nullptr,
+			DoneHandler &&onDone,
+			FailHandler &&onFail = nullptr,
 			ShiftedDcId shiftedDcId = 0,
 			crl::time msCanWait = 0,
-			mtpRequestId afterRequestId = 0) {
+			mtpRequestId afterRequestId = 0,
+			mtpRequestId overrideRequestId = 0) {
 		return send(
 			request,
-			RPCResponseHandler(std::move(onDone), std::move(onFail)),
+			ResponseHandler{ std::move(onDone), std::move(onFail) },
 			shiftedDcId,
 			msCanWait,
-			afterRequestId);
+			afterRequestId,
+			overrideRequestId);
 	}
 
 	template <typename Request>
@@ -191,7 +207,7 @@ public:
 	void sendSerialized(
 			mtpRequestId requestId,
 			details::SerializedRequest &&request,
-			RPCResponseHandler &&callbacks,
+			ResponseHandler &&callbacks,
 			ShiftedDcId shiftedDcId,
 			crl::time msCanWait,
 			mtpRequestId afterRequestId) {
@@ -208,7 +224,7 @@ public:
 
 	[[nodiscard]] rpl::lifetime &lifetime();
 
-signals:
+Q_SIGNALS:
 	void proxyDomainResolved(
 		QString host,
 		QStringList ips,
@@ -218,7 +234,7 @@ private:
 	void sendRequest(
 		mtpRequestId requestId,
 		details::SerializedRequest &&request,
-		RPCResponseHandler &&callbacks,
+		ResponseHandler &&callbacks,
 		ShiftedDcId shiftedDcId,
 		crl::time msCanWait,
 		bool needsLayer,
